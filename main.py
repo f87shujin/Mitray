@@ -1,5 +1,6 @@
 import os
 import sys
+import asyncio
 
 import discord
 from discord.ext import commands
@@ -26,18 +27,29 @@ def create_bot() -> commands.Bot:
         print(f"Logged in as {bot.user} (ID: {bot.user.id})")
         print("Bot is ready.")
 
-    @bot.command(name="ping")
-    async def ping(ctx: commands.Context):
-        await ctx.send("Pong!")
-
     return bot
 
 
-def main() -> None:
+async def load_cogs(bot: commands.Bot) -> None:
+    """Load all cogs (command modules)"""
+    try:
+        await bot.load_extension("cogs.commands")
+        print("✅ Successfully loaded cogs.commands")
+    except Exception as e:
+        print(f"❌ Failed to load cogs.commands: {e}")
+
+
+async def main() -> None:
+    """Main function to run the bot"""
     token = load_token()
     bot = create_bot()
-    bot.run(token)
+    
+    # Load all cogs before starting the bot
+    await load_cogs(bot)
+    
+    # Start the bot
+    await bot.start(token)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
