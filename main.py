@@ -19,13 +19,16 @@ def load_token() -> str:
 def create_bot() -> commands.Bot:
     intents = discord.Intents.default()
     intents.message_content = True  # Enable reading message content for prefix commands
-    bot = commands.Bot(command_prefix="mit", intents=intents)
+    bot = commands.Bot(command_prefix="mit ", intents=intents)
 
     @bot.event
     async def on_ready():
         assert bot.user is not None
         print(f"Logged in as {bot.user} (ID: {bot.user.id})")
         print("Bot is ready.")
+        print(f"Command prefix: 'mit '")
+        print(f"Loaded commands: {[cmd.name for cmd in bot.commands]}")
+        print(f"Total commands: {len(bot.commands)}")
 
     return bot
 

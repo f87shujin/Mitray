@@ -10,6 +10,11 @@ class BotCommands(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    @commands.command(name="hello")
+    async def hello(self, ctx: commands.Context):
+        """Responds with a greeting when just 'mit hello' is typed"""
+        await ctx.send("Hello! 👋")
+
     @commands.command(name="ping")
     async def ping(self, ctx: commands.Context):
         """Simple ping command to test if the bot is responsive"""
