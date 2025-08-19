@@ -2,6 +2,10 @@ import discord
 from discord.ext import commands
 import aiohttp
 import json
+import os
+from dotenv import load_dotenv
+import random
+
 
 
 class BotCommands(commands.Cog):
@@ -9,6 +13,8 @@ class BotCommands(commands.Cog):
     
     def __init__(self, bot):
         self.bot = bot
+        # Load environment variables for API keys
+        load_dotenv()
 
     @commands.command(name="hello")
     async def hello(self, ctx: commands.Context):
@@ -22,13 +28,15 @@ class BotCommands(commands.Cog):
 
     @commands.command(name="r34")
     async def fetch_img(self, ctx: commands.Context, *args):
-        """Fetch images from Gelbooru based on tags and number of results.
+        """Fetch random images from Gelbooru based on tags and number of results.
         Usage: mit r34 tag1 tag2 ... n
-        Example: mit r34 cat 5 (gets 5 cat images)"""
+        Example: mit r34 cat 5 (gets 5 random cat images)
+        
+        Note: You need to set GELBOORU_API_KEY and GELBOORU_USER_ID in your .env file"""
         
         # Check if user provided arguments
         if len(args) < 2:
-            await ctx.send("❌ **Usage:** `mit r34 tag1 tag2 ... n`\n**Example:** `mit r34 cat 5` (gets 5 cat images)")
+            await ctx.send("❌ **Usage:** `mit r34 tag1 tag2 ... n`\n**Example:** `mit r34 cat 5` (gets 5 random cat images)")
             return
 
         # Extract tags and number of results from user input
@@ -43,12 +51,22 @@ class BotCommands(commands.Cog):
             await ctx.send("❌ **Error:** Please provide a valid number of results (1-100).")
             return
 
-        # Construct the API URL
-        tags_query = '+'.join(tags)
-        api_url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&tags={tags_query}&limit={num_results}&json=1"
+        # Get API credentials from environment variables
+        api_key = os.getenv("GELBOORU_API_KEY")
+        user_id = os.getenv("GELBOORU_USER_ID")
+        
+        if not api_key or not user_id:
+            await ctx.send("❌ **Error:** Gelbooru API credentials not configured. Please set GELBOORU_API_KEY and GELBOORU_USER_ID in your .env file.")
+            return
+
+        # Construct the API URL with authentication and random sorting
+        # Fetch more results than requested to ensure better randomization
+        fetch_limit = min(100, max(50, num_results * 3))  # Fetch at least 50, or 3x requested amount
+        tags_query = '+'.join(tags) + '+sort:random'
+        api_url = f"https://gelbooru.com/index.php?page=dapi&s=post&q=index&tags={tags_query}&limit={fetch_limit}&json=1&api_key={api_key}&user_id={user_id}"
 
         # Send initial message
-        loading_msg = await ctx.send(f"🔍 **Searching for:** `{' '.join(tags)}` | **Results:** {num_results}")
+        loading_msg = await ctx.send(f"🎲 **Searching for random:** `{' '.join(tags)}` | **Results:** {num_results}")
 
         try:
             # Fetch data from Gelbooru
@@ -64,22 +82,30 @@ class BotCommands(commands.Cog):
                 await loading_msg.edit(content=f"❌ **No results found** for tags: `{' '.join(tags)}`")
                 return
 
-            # Update loading message with results
-            posts = data['post']
-            await loading_msg.edit(content=f"✅ **Found {len(posts)} results** for tags: `{' '.join(tags)}`")
+            # Get all fetched posts and randomly select the requested number
+            all_posts = data['post']
+            
+            if len(all_posts) < num_results:
+                # If we got fewer results than requested, use all available
+                selected_posts = all_posts
+                await loading_msg.edit(content=f"⚠️ **Only found {len(all_posts)} results** for tags: `{' '.join(tags)}` (requested: {num_results})")
+            else:
+                # Randomly select the requested number of posts
+                selected_posts = random.sample(all_posts, num_results)
+                await loading_msg.edit(content=f"🎲 **Found {len(selected_posts)} random results** for tags: `{' '.join(tags)}`")
 
-            # Send the image URLs to the Discord channel
-            for i, post in enumerate(posts, 1):
+            # Send the randomly selected images
+            for i, post in enumerate(selected_posts, 1):
                 image_url = post.get('file_url')
                 if image_url:
                     # Create an embed for better presentation
                     embed = discord.Embed(
-                        title=f"Result {i}/{len(posts)}",
+                        title=f"Random Result {i}/{len(selected_posts)}",
                         description=f"Tags: `{' '.join(tags)}`",
                         color=0x00ff00
                     )
                     embed.set_image(url=image_url)
-                    embed.set_footer(text=f"Source: Gelbooru | Post ID: {post.get('id', 'N/A')}")
+                    embed.set_footer(text=f"Source: Gelbooru | Post ID: {post.get('id', 'N/A')} | 🎲 Random Selection")
                     
                     await ctx.send(embed=embed)
                 else:
@@ -93,6 +119,8 @@ class BotCommands(commands.Cog):
             await loading_msg.edit(content=f"❌ **Unexpected Error:** {str(e)}")
 
 
+
+
 async def setup(bot):
-    """Setup function to add the cog to the bot"""
+    """Async setup function to add the cog to the bot (awaits add_cog)."""
     await bot.add_cog(BotCommands(bot))
