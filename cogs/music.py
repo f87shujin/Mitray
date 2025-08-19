@@ -79,6 +79,8 @@ class Music(commands.Cog):
         self.guild_queues: dict[int, Deque[str]] = {}
         self.current_files: dict[int, str] = {}
         self.play_locks: dict[int, asyncio.Lock] = {}
+        self.loop_tracks: dict[int, str] = {}  # Store looped tracks by guild ID
+        self.current_playing: dict[int, str] = {}  # Store currently playing track URL/query
         self.log = logging.getLogger("mitray.music")
         
         # Configure SSL context with certifi certificates
@@ -103,6 +105,35 @@ class Music(commands.Cog):
         if guild_id not in self.guild_queues:
             self.guild_queues[guild_id] = deque()
             self.play_locks[guild_id] = asyncio.Lock()
+
+    async def _search_youtube(self, query: str) -> tuple[str, str]:
+        """Search YouTube and return the best matching video URL and title."""
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'noplaylist': True,
+            'quiet': True,
+            'no_warnings': True,
+            'nocheckcertificate': True,
+            'default_search': 'ytsearch',  # Enable YouTube search
+            'extract_flat': True,  # Don't download video info
+            'max_downloads': 1,  # Only get the first result
+        }
+
+        def _search():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                try:
+                    result = ydl.extract_info(f"ytsearch:{query}", download=False)
+                    if not result or not result.get('entries'):
+                        raise RuntimeError("No results found")
+                    video = result['entries'][0]
+                    return f"https://www.youtube.com/watch?v={video['id']}", video.get('title', 'Unknown title')
+                except Exception as e:
+                    self.log.error(f"Search failed: {e}")
+                    raise
+
+        loop = asyncio.get_event_loop()
+        url, title = await loop.run_in_executor(None, _search)
+        return url, title
 
     async def _download_audio(self, url: str) -> str:
         """Return a direct audio stream URL (uses yt-dlp extract_info without downloading)."""
@@ -161,8 +192,18 @@ class Music(commands.Cog):
             if not self.guild_queues[guild_id]:
                 return
 
-            url = self.guild_queues[guild_id].popleft()
+            query = self.guild_queues[guild_id].popleft()
+            # Store the current playing track
+            self.current_playing[guild_id] = query
+            
             try:
+                # If it's not a URL, search for it
+                if not (query.startswith("http://") or query.startswith("https://")):
+                    url, title = await self._search_youtube(query)
+                else:
+                    url = query
+                    title = "Link"  # We'll get the actual title from yt-dlp later
+                
                 # Get the direct audio URL from YouTube
                 stream_url = await self._download_audio(url)
                 
@@ -199,8 +240,8 @@ class Music(commands.Cog):
                     try:
                         if guild_id in self.current_files:
                             source = self.current_files.pop(guild_id)
-                            if isinstance(source, PCMAudioSource):
-                                source.cleanup()
+                            if hasattr(source, 'cleanup'):
+                                await source.cleanup()
                     except Exception:
                         pass
                     return
@@ -229,8 +270,8 @@ class Music(commands.Cog):
                         try:
                             if guild_id in self.current_files:
                                 source = self.current_files.pop(guild_id)
-                                if isinstance(source, PCMAudioSource):
-                                    source.cleanup()
+                                if hasattr(source, 'cleanup'):
+                                    await source.cleanup()
                         except Exception:
                             pass
                         return
@@ -246,6 +287,9 @@ class Music(commands.Cog):
                     except Exception as e:
                         self.log.error("Error cleaning up audio source: %s", e)
                     finally:
+                        # If this guild has a looped track, play it again
+                        if guild_id in self.loop_tracks:
+                            self.guild_queues[guild_id].appendleft(self.loop_tracks[guild_id])
                         # play next track if any
                         await self._play_next(ctx)
 
@@ -307,6 +351,7 @@ class Music(commands.Cog):
         guild_id = ctx.guild.id
         if guild_id in self.guild_queues:
             self.guild_queues.pop(guild_id, None)
+        self.current_playing.pop(guild_id, None)  # Clear currently playing track
         if guild_id in self.current_files:
             try:
                 source = self.current_files.pop(guild_id)
@@ -318,14 +363,22 @@ class Music(commands.Cog):
 
     @commands.command(name="play")
     async def play(self, ctx: commands.Context, *, query: str):
-        """Enqueue a YouTube URL (or direct link). Use full URL for best results."""
+        """Play music from YouTube. You can use a URL or search terms."""
         if not ctx.author.voice or not ctx.author.voice.channel:
             await ctx.send("❌ You are not in a voice channel.")
             return
-        # If query looks like a plain search term, tell user to provide URL
+
+        # If it's not a URL, treat it as a search query
         if not (query.startswith("http://") or query.startswith("https://")):
-            await ctx.send("❗ Please provide a YouTube URL. Search is not implemented in this simple player.")
-            return
+            try:
+                search_msg = await ctx.send(f"🔍 Searching YouTube for: `{query}`")
+                url, title = await self._search_youtube(query)
+                await search_msg.edit(content=f"✅ Found: `{title}`")
+            except Exception as e:
+                await ctx.send(f"❌ Search failed: {e}")
+                return
+        else:
+            url = query
 
         guild_id = ctx.guild.id
         self._ensure_queue(guild_id)
@@ -337,6 +390,82 @@ class Music(commands.Cog):
             # schedule _play_next as a background task to avoid blocking the command
             self.bot.loop.create_task(self._play_next(ctx))
 
+    @commands.command(name="loop")
+    async def loop(self, ctx: commands.Context, *, query: str = None):
+        """Loop the current track or play and loop a new track.
+        Use without arguments to loop the current track, or with a query/URL to play and loop a new track."""
+        guild_id = ctx.guild.id
+
+        if not query:
+            # If no query provided, try to loop the currently playing track
+            voice = ctx.voice_client
+            if voice and voice.is_playing() and guild_id in self.current_playing:
+                current_track = self.current_playing[guild_id]
+                self.loop_tracks[guild_id] = current_track
+                await ctx.send("🔁 Now looping the current track!")
+            else:
+                await ctx.send("❌ Nothing is currently playing!")
+            return
+
+        # Stop any existing playback and clear queue
+        voice = ctx.voice_client
+        if voice and voice.is_playing():
+            voice.stop()
+        
+        # Clear the queue and add new track
+        self._ensure_queue(guild_id)
+        self.guild_queues[guild_id].clear()
+        
+        # If it's not a URL, treat it as a search query
+        if not (query.startswith("http://") or query.startswith("https://")):
+            try:
+                search_msg = await ctx.send(f"🔍 Searching YouTube for: `{query}`")
+                url, title = await self._search_youtube(query)
+                await search_msg.edit(content=f"✅ Found: `{title}`")
+            except Exception as e:
+                await ctx.send(f"❌ Search failed: {e}")
+                return
+        else:
+            url = query
+
+        # Store the track for looping and add it to queue
+        self.loop_tracks[guild_id] = url
+        self.guild_queues[guild_id].append(url)
+        await ctx.send(f"🔁 Now playing and looping: {url}")
+        
+        # Start playback if not already playing
+        if not voice or not voice.is_playing():
+            self.bot.loop.create_task(self._play_next(ctx))
+
+    @commands.command(name="unloop")
+    async def unloop(self, ctx: commands.Context):
+        """Stop looping the current track."""
+        guild_id = ctx.guild.id
+        if guild_id in self.loop_tracks:
+            del self.loop_tracks[guild_id]
+            await ctx.send("✅ Stopped looping!")
+        else:
+            await ctx.send("❌ No track is currently looping!")
+
+    @commands.command(name="next")
+    async def next(self, ctx: commands.Context):
+        """Skip to the next track in the queue."""
+        voice = ctx.voice_client
+        if not voice:
+            await ctx.send("❌ Not connected to a voice channel.")
+            return
+        
+        guild_id = ctx.guild.id
+        if not self.guild_queues.get(guild_id):
+            await ctx.send("❌ No more tracks in the queue.")
+            return
+
+        if voice.is_playing():
+            voice.stop()  # This will trigger the _after callback which will play the next song
+            await ctx.send("⏭️ Skipping to next track...")
+        else:
+            await ctx.send("❌ Nothing is currently playing!")
+
     @commands.command(name="stop")
     async def stop(self, ctx: commands.Context):
         """Stop playback and clear queue."""
@@ -347,7 +476,10 @@ class Music(commands.Cog):
         if voice.is_playing():
             voice.stop()
         guild_id = ctx.guild.id
+        # Clear queue and loop status
         self.guild_queues.pop(guild_id, None)
+        self.loop_tracks.pop(guild_id, None)  # Stop looping when stopping playback
+        self.current_playing.pop(guild_id, None)  # Clear currently playing track
         if guild_id in self.current_files:
             try:
                 source = self.current_files.pop(guild_id)
