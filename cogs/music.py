@@ -73,7 +73,11 @@ async def create_audio_source(url: str) -> discord.AudioSource:
 
     # FFmpeg options for optimal audio quality
     ffmpeg_options = {
-        'options': '-vn -b:a 192k -bufsize 3072k -acodec libopus -application audio -frame_duration 20 -af "bass=g=1.1:f=110:w=0.3,treble=g=1.1:f=3500:w=0.3,volume=1.25" -ar 48000 -ac 2',  # Optimized audio settings
+        'options': '-vn -b:a 192k -bufsize 3072k -acodec libopus -application audio ' 
+                   '-af "loudnorm=I=-14:TP=-2:LRA=11,'  # Basic loudness normalization
+                   'volume=0.85,'  # Slight volume reduction
+                   'dynaudnorm=f=150:g=15:p=0.75"'  # Simple dynamic normalization
+                   ' -ar 48000 -ac 2',  # High quality audio settings
         'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -protocol_whitelist file,http,https,tcp,tls,crypto,pipe,hls -tls_verify 0 -analyzeduration 0 -probesize 1000000'  # Enhanced streaming options
     }
     

@@ -99,7 +99,7 @@ async def load_cogs(bot: commands.Bot) -> None:
     import inspect
 
     # list of cog modules to load
-    cog_modules = ["cogs.commands", "cogs.music", "cogs.fun"]
+    cog_modules = ["cogs.commands", "cogs.music", "cogs.fun", "cogs.ai"]
     for mod_name in cog_modules:
         # try the normal extension loader first (works with modern discord.py async setup)
         try:
