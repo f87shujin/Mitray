@@ -1,6 +1,21 @@
 import discord
 from discord.ext import commands
 
+ydl_opts = {
+    'format': '251/250/249/bestaudio/best',  # Prefer opus formats
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'extract_audio': True,
+    'ignoreerrors': True,
+    'no_color': True,
+    'geo_bypass': True,
+    'nocheckcertificate': True,
+    'http_headers': {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    }
+}
+
 class Fun(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot

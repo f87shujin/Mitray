@@ -22,7 +22,7 @@ import wave
 async def create_audio_source(url: str) -> discord.AudioSource:
     """Create an FFmpegOpusAudio source for the given URL."""
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format': '140/251/250/249/bestaudio*[acodec^=opus]/bestaudio/best',
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -31,6 +31,8 @@ async def create_audio_source(url: str) -> discord.AudioSource:
         'no_color': True,
         'geo_bypass': True,
         'nocheckcertificate': True,
+        'no_check_certificate': True,  # additional SSL bypass
+        'hls_prefer_native': True,  # Enable HLS support
         'http_headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -44,27 +46,35 @@ async def create_audio_source(url: str) -> discord.AudioSource:
         if not info:
             raise RuntimeError("Could not extract video information")
         
+        # First try to get direct URL
         url = info.get('url')
         if not url:
-            # Try direct URL extraction from formats
+            # Try to get URL from formats
             formats = info.get('formats', [])
             if not formats:
                 raise RuntimeError("No playable formats found")
-            # Get best audio format
-            audio_formats = [f for f in formats if f.get('acodec') != 'none']
-            if audio_formats:
-                url = audio_formats[0]['url']
+            
+            # First try to find m4a format (140) or opus formats
+            preferred_formats = [f for f in formats if f.get('format_id') in ['140', '251', '250', '249']]
+            if preferred_formats:
+                url = preferred_formats[0]['url']
             else:
-                url = formats[0]['url']
+                # Get best audio format
+                audio_formats = [f for f in formats if f.get('acodec') != 'none']
+                if audio_formats:
+                    # Sort by quality (bitrate)
+                    audio_formats.sort(
+                        key=lambda f: int(f.get('abr', 0) or f.get('tbr', 0) or 0),
+                        reverse=True
+                    )
+                    url = audio_formats[0]['url']
+                else:
+                    url = formats[0]['url']
 
     # FFmpeg options for optimal audio quality
     ffmpeg_options = {
-        'options': '-vn -bufsize 64k',  # Disable video, set buffer size
-        'before_options': (
-            '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '  # Handle network issues
-            '-protocol_whitelist file,http,https,tcp,tls,crypto,pipe '     # Allow required protocols
-            '-tls_verify 0'                                                # Disable SSL verification
-        )
+        'options': '-vn -b:a 192k -bufsize 3072k -acodec libopus -application audio -frame_duration 20 -af "bass=g=1.1:f=110:w=0.3,treble=g=1.1:f=3500:w=0.3,volume=1.25" -ar 48000 -ac 2',  # Optimized audio settings
+        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -protocol_whitelist file,http,https,tcp,tls,crypto,pipe,hls -tls_verify 0 -analyzeduration 0 -probesize 1000000'  # Enhanced streaming options
     }
     
     # Create FFmpegOpusAudio source
@@ -85,21 +95,47 @@ class Music(commands.Cog):
         
         # Configure SSL context with certifi certificates
         try:
-            ssl_context = ssl.create_default_context(cafile=certifi.where())
-            urllib3.util.ssl_.DEFAULT_CIPHERS += ':HIGH:!DH:!aNULL'
+            self.ssl_context = ssl.create_default_context(cafile=certifi.where())
             urllib3.disable_warnings()
-            self.ssl_context = ssl_context
         except Exception as e:
             self.log.warning(f"Failed to configure SSL context: {e}")
             self.ssl_context = None
 
+        # Try to load opus
+        if not self._load_opus():
+            self.log.warning("Opus is NOT loaded; voice audio will be silent until libopus is available")
+
+    def _load_opus(self) -> bool:
+        """Try to load opus library from various possible locations."""
         try:
             if discord.opus.is_loaded():
-                self.log.info("Opus is loaded for voice")
-            else:
-                self.log.warning("Opus is NOT loaded; voice audio will be silent until libopus is available")
+                return True
         except Exception:
-            self.log.warning("Opus availability could not be determined; ensure libopus DLL is available on Windows PATH")
+            pass
+
+        try:
+            # Try common opus DLL names
+            opus_names = [
+                'libopus-0.dll',
+                'opus.dll',
+                str(Path.cwd() / 'libopus-0.dll'),
+                str(Path.cwd() / 'opus.dll'),
+                str(Path(__file__).parent.parent / 'libopus-0.dll'),
+                str(Path(__file__).parent.parent / 'opus.dll'),
+            ]
+            
+            for name in opus_names:
+                try:
+                    discord.opus.load_opus(name)
+                    self.log.info(f"Successfully loaded Opus from: {name}")
+                    return True
+                except Exception:
+                    continue
+
+            return False
+        except Exception as e:
+            self.log.error(f"Failed to load Opus: {e}")
+            return False
 
     def _ensure_queue(self, guild_id: int):
         if guild_id not in self.guild_queues:
@@ -140,12 +176,14 @@ class Music(commands.Cog):
         self.log.info("Extracting stream URL for %s", url)
 
         ydl_opts = {
-            'format': 'bestaudio/best',
+            'format': '251/250/249/bestaudio/best',  # prioritize opus formats
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,  # Disable SSL certificate verification
             'nocheckcertificate_ffmpeg': True,  # Also disable for FFmpeg
+            'no_check_certificate': True,  # additional SSL bypass
+            'extract_flat': 'in_playlist',
             'http_headers': {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
