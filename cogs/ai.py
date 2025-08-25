@@ -9,6 +9,7 @@ from collections import defaultdict, deque
 from typing import Dict, Deque, List, Tuple
 
 class AI(commands.Cog):
+
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.api_base = "http://localhost:11434/api"
@@ -31,8 +32,8 @@ class AI(commands.Cog):
             # Add the new message to history before generating response
             self.conversation_history[channel_id].append((username, prompt))
 
-            # Build context from last 10 turns (user+bot pairs)
-            history = list(self.conversation_history[channel_id])[-20:]  # 10 turns = 20 messages
+            # Build context from last 35 messages (short-term memory)
+            history = list(self.conversation_history[channel_id])[-35:]
             context = ""
             for author, msg in history:
                 context += f"{author}: {msg}\n"
