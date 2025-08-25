@@ -16,6 +16,17 @@ class BotCommands(commands.Cog):
         # Load environment variables for API keys
         load_dotenv()
 
+    
+    @commands.command(name="clean")
+    @commands.has_permissions(manage_messages=True)
+    async def clean(self, ctx: commands.Context, n: int):
+        """Delete the previous n messages in this channel (usage: mit clean n)"""
+        if n < 1:
+            await ctx.send("Please specify a positive number of messages to delete.")
+            return
+        deleted = await ctx.channel.purge(limit=n+1)  # +1 to include the command message itself
+        await ctx.send(f"Deleted {len(deleted)-1} messages.", delete_after=5)
+
     @commands.command(name="hello")
     async def hello(self, ctx: commands.Context):
         """Responds with a greeting when just 'mit hello' is typed"""
