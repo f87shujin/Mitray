@@ -9,7 +9,6 @@ from collections import defaultdict, deque
 from typing import Dict, Deque, List, Tuple
 
 class AI(commands.Cog):
-
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.api_base = "http://localhost:11434/api"
