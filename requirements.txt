@@ -11,3 +11,4 @@ spotipy
 certifi
 urllib3
 numpy
+httpx
