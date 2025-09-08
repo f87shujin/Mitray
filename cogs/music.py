@@ -1,3 +1,5 @@
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials
 import os
 import asyncio
 import tempfile
@@ -13,7 +15,6 @@ import logging
 import yt_dlp
 import urllib3
 from pathlib import Path
-import sounddevice as sd
 import numpy as np
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -86,6 +87,58 @@ async def create_audio_source(url: str) -> discord.AudioSource:
 
 
 class Music(commands.Cog):
+
+    @commands.command(name="spotify")
+    async def spotify(self, ctx: commands.Context, url: str):
+        """Play all tracks from a Spotify playlist URL using YouTube search."""
+        # Check for Spotify credentials in environment
+        client_id = os.getenv("SPOTIFY_CLIENT_ID")
+        client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
+        if not client_id or not client_secret:
+            await ctx.send("❌ Spotify API credentials not set. Please set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET in your .env file.")
+            return
+
+        # Validate playlist URL
+        if "playlist" not in url:
+            await ctx.send("❌ Please provide a valid Spotify playlist URL.")
+            return
+
+        await ctx.send("🔎 Fetching playlist tracks from Spotify...")
+        try:
+            sp = spotipy.Spotify(auth_manager=SpotifyClientCredentials(client_id=client_id, client_secret=client_secret))
+            playlist_id = url.split("playlist/")[-1].split("?")[0]
+            results = sp.playlist_tracks(playlist_id)
+            tracks = results["items"]
+            # Handle pagination if >100 tracks
+            while results["next"]:
+                results = sp.next(results)
+                tracks.extend(results["items"])
+        except Exception as e:
+            await ctx.send(f"❌ Failed to fetch playlist: {e}")
+            return
+
+        if not tracks:
+            await ctx.send("❌ No tracks found in the playlist.")
+            return
+
+        guild_id = ctx.guild.id
+        self._ensure_queue(guild_id)
+        count = 0
+        for item in tracks:
+            track = item.get("track")
+            if not track:
+                continue
+            name = track.get("name")
+            artists = ", ".join([a["name"] for a in track.get("artists", [])])
+            search_query = f"{name} {artists}"
+            self.guild_queues[guild_id].append(search_query)
+            count += 1
+
+        await ctx.send(f"✅ Enqueued {count} tracks from the playlist! Starting playback...")
+        # If nothing is playing, start playback
+        voice = ctx.guild.voice_client or discord.utils.get(self.bot.voice_clients, guild=ctx.guild)
+        if not voice or (not voice.is_playing() and not voice.is_paused()):
+            self.bot.loop.create_task(self._play_next(ctx))
     """Simple music cog using pytube to download audio and ffmpeg to play."""
 
     def __init__(self, bot: commands.Bot):
@@ -356,7 +409,34 @@ class Music(commands.Cog):
                         continue
 
                     voice.play(source, after=_after)
-                    await ctx.send(f"🎶 Now playing: <{url}>")
+                    
+                    # Get video information including thumbnail
+                    try:
+                        info = None
+                        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                            info = ydl.extract_info(url, download=False, process=False)
+                        
+                        # Create an embed with thumbnail
+                        embed = discord.Embed(
+                            title="🎵 Now Playing",
+                            description=f"[{info.get('title', 'Unknown Track')}]({url})",
+                            color=0x1DB954
+                        )
+                        
+                        # Add thumbnail if available
+                        if info and info.get('thumbnail'):
+                            embed.set_thumbnail(url=info['thumbnail'])
+                        
+                        # Add duration info if available
+                        if info and info.get('duration'):
+                            minutes, seconds = divmod(info['duration'], 60)
+                            embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}")
+                        
+                        await ctx.send(embed=embed, view=MusicControls(self, ctx))
+                    except Exception:
+                        # Fallback if getting thumbnail fails
+                        await ctx.send(f"🎶 Now playing: <{url}>", view=MusicControls(self, ctx))
+                    
                     self.log.info("Started playback for %s in guild %s", url, guild_id)
                     break
                 except discord.ClientException as e:
@@ -530,6 +610,70 @@ class Music(commands.Cog):
             except Exception:
                 pass
         await ctx.send("⏹️ Stopped and cleared the queue.")
+
+class MusicControls(discord.ui.View):
+    def __init__(self, music_cog, ctx):
+        super().__init__(timeout=None)
+        self.music_cog = music_cog
+        self.ctx = ctx
+
+    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.success, row=0)
+    async def play_pause(self, interaction: discord.Interaction, button: discord.ui.Button):
+        voice = interaction.guild.voice_client
+        if voice and voice.is_playing():
+            voice.pause()
+            await interaction.response.send_message("⏸️ Paused!", ephemeral=True)
+        elif voice and voice.is_paused():
+            voice.resume()
+            await interaction.response.send_message("▶️ Resumed playback!", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Nothing is playing right now.", ephemeral=True)
+
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.primary, row=0)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.next(self.ctx)
+        await interaction.response.send_message("⏭️ Skipped to next track!", ephemeral=True)
+    
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, row=0)
+    async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.music_cog.stop(self.ctx)
+        await interaction.response.send_message("⏹️ Stopped playback and cleared the queue!", ephemeral=True)
+    
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.secondary, row=0)
+    async def loop_toggle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild.id
+        if guild_id in self.music_cog.loop_tracks:
+            del self.music_cog.loop_tracks[guild_id]
+            await interaction.response.send_message("✅ Stopped looping!", ephemeral=True)
+        else:
+            voice = interaction.guild.voice_client
+            if voice and voice.is_playing() and guild_id in self.music_cog.current_playing:
+                current_track = self.music_cog.current_playing[guild_id]
+                self.music_cog.loop_tracks[guild_id] = current_track
+                await interaction.response.send_message("🔁 Now looping the current track!", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Nothing is currently playing to loop!", ephemeral=True)
+                
+    @discord.ui.button(emoji="📋", style=discord.ButtonStyle.secondary, row=1)
+    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = interaction.guild.id
+        queue = self.music_cog.guild_queues.get(guild_id, deque())
+        
+        if not queue:
+            await interaction.response.send_message("📋 Queue is empty!", ephemeral=True)
+            return
+        
+        queue_text = "\n".join([f"{i+1}. {track}" for i, track in enumerate(queue)])
+        embed = discord.Embed(
+            title="📋 Queue",
+            description=queue_text[:4000] if len(queue_text) > 4000 else queue_text,
+            color=0x1DB954
+        )
+        
+        # Add count of tracks
+        embed.set_footer(text=f"Total tracks: {len(queue)}")
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

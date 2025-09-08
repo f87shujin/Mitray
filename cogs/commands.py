@@ -20,12 +20,21 @@ class BotCommands(commands.Cog):
     @commands.command(name="clean")
     @commands.has_permissions(manage_messages=True)
     async def clean(self, ctx: commands.Context, n: int):
-        """Delete the previous n messages in this channel (usage: mit clean n)"""
+        """Delete the previous n messages in this channel (usage: mit clean n), with GIF effect."""
         if n < 1:
             await ctx.send("Please specify a positive number of messages to delete.")
             return
-        deleted = await ctx.channel.purge(limit=n+1)  # +1 to include the command message itself
-        await ctx.send(f"Deleted {len(deleted)-1} messages.", delete_after=5)
+        # Send the GIF as an embed
+        gif_url = "https://cdn.discordapp.com/attachments/1295012071494127627/1409400308131561553/The_Hand_JoJo_erasing_space.webp?ex=68ad3dd2&is=68abec52&hm=57be99671520f13526ffe2d94dd1c1b20952fe8fb58bc8d83fa7c009462b36e8&"
+        embed = discord.Embed()
+        embed.set_image(url=gif_url)
+        gif_msg = await ctx.send(embed=embed)
+        # Wait 1.3 seconds
+        import asyncio
+        await asyncio.sleep(1.3)
+        # Delete messages (including the command itself)
+        deleted = await ctx.channel.purge(limit=n+1)
+       
 
     @commands.command(name="hello")
     async def hello(self, ctx: commands.Context):
@@ -40,27 +49,33 @@ class BotCommands(commands.Cog):
     @commands.command(name="r34")
     async def fetch_img(self, ctx: commands.Context, *args):
         """Fetch random images from Gelbooru based on tags and number of results.
-        Usage: mit r34 tag1 tag2 ... n
+        Usage: mit r34 tag1 tag2 ... [n]
         Example: mit r34 cat 5 (gets 5 random cat images)
+        If no number is provided, defaults to 1 image.
         
         Note: You need to set GELBOORU_API_KEY and GELBOORU_USER_ID in your .env file"""
         
         # Check if user provided arguments
-        if len(args) < 2:
-            await ctx.send("❌ **Usage:** `mit r34 tag1 tag2 ... n`\n**Example:** `mit r34 cat 5` (gets 5 random cat images)")
+        if len(args) < 1:
+            await ctx.send("❌ **Usage:** `mit r34 tag1 tag2 ... [n]`\n**Example:** `mit r34 cat 5` (gets 5 random cat images)")
             return
 
-        # Extract tags and number of results from user input
-        *tags, num_results = args
-        
-        try:
-            num_results = int(num_results)
-            if num_results < 1 or num_results > 100:
-                await ctx.send("❌ **Error:** Number of results must be between 1 and 100.")
+        # Check if last argument is a number
+        if args[-1].isdigit():
+            # Extract tags and number of results from user input
+            *tags, num_results_str = args
+            try:
+                num_results = int(num_results_str)
+                if num_results < 1 or num_results > 100:
+                    await ctx.send("❌ **Error:** Number of results must be between 1 and 100.")
+                    return
+            except ValueError:
+                await ctx.send("❌ **Error:** Please provide a valid number of results (1-100).")
                 return
-        except ValueError:
-            await ctx.send("❌ **Error:** Please provide a valid number of results (1-100).")
-            return
+        else:
+            # If last argument is not a number, use all args as tags and default to 1 result
+            tags = args
+            num_results = 1
 
         # Get API credentials from environment variables
         api_key = os.getenv("GELBOORU_API_KEY")
@@ -103,7 +118,11 @@ class BotCommands(commands.Cog):
             else:
                 # Randomly select the requested number of posts
                 selected_posts = random.sample(all_posts, num_results)
-                await loading_msg.edit(content=f"🎲 **Found {len(selected_posts)} random results** for tags: `{' '.join(tags)}`")
+                # Different message if only one result
+                if num_results == 1:
+                    await loading_msg.edit(content=f"🎲 **Found a random result** for tags: `{' '.join(tags)}`")
+                else:
+                    await loading_msg.edit(content=f"🎲 **Found {len(selected_posts)} random results** for tags: `{' '.join(tags)}`")
 
             # Send the randomly selected images
             for i, post in enumerate(selected_posts, 1):
