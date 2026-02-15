@@ -72,14 +72,14 @@ async def create_audio_source(url: str) -> discord.AudioSource:
                 else:
                     url = formats[0]['url']
 
-    # FFmpeg options for optimal audio quality
+    # FFmpeg options optimized for low latency
     ffmpeg_options = {
-        'options': '-vn -b:a 192k -bufsize 3072k -acodec libopus -application audio ' 
-                   '-af "loudnorm=I=-14:TP=-2:LRA=11,'  # Basic loudness normalization
-                   'volume=0.85,'  # Slight volume reduction
-                   'dynaudnorm=f=150:g=15:p=0.75"'  # Simple dynamic normalization
-                   ' -ar 48000 -ac 2',  # High quality audio settings
-        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -protocol_whitelist file,http,https,tcp,tls,crypto,pipe,hls -tls_verify 0 -analyzeduration 0 -probesize 1000000'  # Enhanced streaming options
+        'options': '-vn -b:a 128k -bufsize 512k -acodec libopus -application audio ' 
+                   '-ar 48000 -ac 2',  # Removed audio filters to reduce latency
+        'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 '
+                         '-protocol_whitelist file,http,https,tcp,tls,crypto,pipe,hls '
+                         '-tls_verify 0 -analyzeduration 0 -probesize 32768 '
+                         '-fflags +nobuffer -flags low_delay'  # Low latency flags
     }
     
     # Create FFmpegOpusAudio source
@@ -207,15 +207,15 @@ class Music(commands.Cog):
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
-            'default_search': 'ytsearch',  # Enable YouTube search
-            'extract_flat': True,  # Don't download video info
-            'max_downloads': 1,  # Only get the first result
+            'default_search': 'ytsearch1',  # Only get 1 result (was default which gets 5)
+            'extract_flat': 'in_playlist',  # Faster extraction
+            'socket_timeout': 10,  # Reduced timeout
         }
 
         def _search():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 try:
-                    result = ydl.extract_info(f"ytsearch:{query}", download=False)
+                    result = ydl.extract_info(f"ytsearch1:{query}", download=False)
                     if not result or not result.get('entries'):
                         raise RuntimeError("No results found")
                     video = result['entries'][0]
@@ -233,22 +233,20 @@ class Music(commands.Cog):
         self.log.info("Extracting stream URL for %s", url)
 
         ydl_opts = {
-            'format': '251/250/249/bestaudio/best',  # prioritize opus formats
+            'format': '251/250/249/140/bestaudio/best',  # prioritize opus and m4a formats
             'noplaylist': True,
             'quiet': True,
             'no_warnings': True,
-            'nocheckcertificate': True,  # Disable SSL certificate verification
-            'nocheckcertificate_ffmpeg': True,  # Also disable for FFmpeg
-            'no_check_certificate': True,  # additional SSL bypass
-            'extract_flat': 'in_playlist',
+            'nocheckcertificate': True,
+            'no_check_certificate': True,
+            'extract_flat': False,  # Need full info for URL
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-us,en;q=0.5',
-                'Sec-Fetch-Mode': 'navigate',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             },
-            'socket_timeout': 15,
-            'retries': 3
+            'socket_timeout': 10,  # Reduced from 15
+            'retries': 2,  # Reduced from 3
+            'fragment_retries': 2,  # Retry fragments
+            'skip_unavailable_fragments': True,  # Skip bad fragments
         }
         
         # Add SSL context if available
@@ -258,7 +256,6 @@ class Music(commands.Cog):
         def _extract():
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=False)
-                # If extract_info provides a direct url, use it
                 if info is None:
                     raise RuntimeError('yt-dlp returned no info')
                 if 'url' in info and info.get('url'):
@@ -276,7 +273,7 @@ class Music(commands.Cog):
 
         loop = asyncio.get_event_loop()
         out_url = await loop.run_in_executor(None, _extract)
-        self.log.info("Extracted stream URL for %s -> %s", url, out_url)
+        self.log.info("Extracted stream URL successfully")
         return out_url
 
     async def _play_next(self, ctx: commands.Context):
@@ -291,38 +288,7 @@ class Music(commands.Cog):
             # Store the current playing track
             self.current_playing[guild_id] = query
             
-            try:
-                # If it's not a URL, search for it
-                if not (query.startswith("http://") or query.startswith("https://")):
-                    url, title = await self._search_youtube(query)
-                else:
-                    url = query
-                    title = "Link"  # We'll get the actual title from yt-dlp later
-                
-                # Get the direct audio URL from YouTube
-                stream_url = await self._download_audio(url)
-                
-                try:
-                    # Create FFmpeg Opus audio source
-                    source = await create_audio_source(stream_url)
-                    self.log.info("Created audio source for %s", url)
-                except Exception as e:
-                    self.log.exception("Audio setup failed for %s", url)
-                    await ctx.send(f"❌ Failed to setup audio source: {e}")
-                    self.bot.loop.create_task(self._play_next(ctx))
-                    return
-                
-            except Exception as e:
-                self.log.exception("Download failed for %s", url)
-                await ctx.send(f"❌ Failed to get audio stream: {e}")
-                # try next track if available
-                self.bot.loop.create_task(self._play_next(ctx))
-                return
-
-            # Store source for cleanup
-            self.current_files[guild_id] = source
-
-            # ensure there is a voice client connected to the author's channel
+            # STEP 1: Join voice channel FIRST (before any audio processing)
             voice: discord.VoiceClient | None = ctx.guild.voice_client or discord.utils.get(self.bot.voice_clients, guild=ctx.guild)
             channel = None
             if ctx.author and getattr(ctx.author, 'voice', None):
@@ -331,45 +297,47 @@ class Music(commands.Cog):
             if not voice or not voice.is_connected():
                 if channel is None:
                     await ctx.send("❌ Can't join voice channel: author is not in a voice channel.")
-                    # cleanup audio source if created
-                    try:
-                        if guild_id in self.current_files:
-                            source = self.current_files.pop(guild_id)
-                            if hasattr(source, 'cleanup'):
-                                await source.cleanup()
-                    except Exception:
-                        pass
                     return
                 try:
                     self.log.info("Connecting to voice channel %s", channel.name)
                     voice = await channel.connect()
-                    self.log.info("Connect returned; waiting for stable connection for %s", channel.name)
-                    # wait for voice client to report connected state (race avoidance)
-                    connected = False
-                    for _ in range(20):
-                        # small sleep to allow handshake to settle
+                    # Brief wait for connection to stabilize (reduced from 5s to 0.5s max)
+                    for _ in range(2):
                         await asyncio.sleep(0.25)
                         voice = discord.utils.get(self.bot.voice_clients, guild=ctx.guild)
                         if voice and getattr(voice, 'is_connected', lambda: False)():
-                            connected = True
                             break
-                    if not connected:
-                        raise RuntimeError('Voice client failed to reach connected state')
                     self.log.info("Connected to voice channel %s", channel.name)
                 except Exception as e:
                     self.log.exception("Failed to connect to voice channel %s: %s", channel, e)
-                    # try to resolve existing client again
-                    voice = discord.utils.get(self.bot.voice_clients, guild=ctx.guild)
-                    if not voice or not voice.is_connected():
-                        await ctx.send(f"❌ Failed to connect to voice channel: {e}")
-                        try:
-                            if guild_id in self.current_files:
-                                source = self.current_files.pop(guild_id)
-                                if hasattr(source, 'cleanup'):
-                                    await source.cleanup()
-                        except Exception:
-                            pass
-                        return
+                    await ctx.send(f"❌ Failed to connect to voice channel: {e}")
+                    return
+            
+            # STEP 2: Now process audio (bot is already in channel)
+            try:
+                # If it's not a URL, search for it
+                if not (query.startswith("http://") or query.startswith("https://")):
+                    url, title = await self._search_youtube(query)
+                else:
+                    url = query
+                    title = "Link"
+                
+                # Get the direct audio URL from YouTube
+                stream_url = await self._download_audio(url)
+                
+                # Create FFmpeg Opus audio source
+                source = await create_audio_source(stream_url)
+                self.log.info("Created audio source for %s", url)
+                
+            except Exception as e:
+                self.log.exception("Failed to prepare audio for %s", url)
+                await ctx.send(f"❌ Failed to prepare audio: {e}")
+                # try next track if available
+                self.bot.loop.create_task(self._play_next(ctx))
+                return
+
+            # Store source for cleanup
+            self.current_files[guild_id] = source
 
             def _after(error):
                 # schedule cleanup and next play
@@ -394,26 +362,21 @@ class Music(commands.Cog):
                     fut.result()
                 except Exception:
                     pass
-            # Get the FFmpeg source that we stored earlier
-            source = self.current_files[guild_id]  # This is our FFmpegOpusAudio instance
 
-            # attempt to start playback, retry if not connected yet
-            play_attempts = 0
-            while play_attempts < 4:
-                try:
-                    voice = discord.utils.get(self.bot.voice_clients, guild=ctx.guild)
-                    if not voice or not voice.is_connected():
-                        self.log.warning("Voice client not connected yet, waiting before play (attempt %s)", play_attempts + 1)
-                        await asyncio.sleep(0.5)
-                        play_attempts += 1
-                        continue
-
-                    voice.play(source, after=_after)
-                    
-                    # Get video information including thumbnail
+            # STEP 3: Start playback immediately (no retry loop needed)
+            try:
+                voice = discord.utils.get(self.bot.voice_clients, guild=ctx.guild)
+                if not voice or not voice.is_connected():
+                    raise RuntimeError("Voice client disconnected before playback")
+                
+                voice.play(source, after=_after)
+                self.log.info("Started playback for %s in guild %s", url, guild_id)
+                
+                # STEP 4: Send notification asynchronously (don't block playback)
+                async def _send_now_playing():
                     try:
                         info = None
-                        with yt_dlp.YoutubeDL({'quiet': True}) as ydl:
+                        with yt_dlp.YoutubeDL({'quiet': True, 'no_warnings': True}) as ydl:
                             info = ydl.extract_info(url, download=False, process=False)
                         
                         # Create an embed with thumbnail
@@ -423,11 +386,9 @@ class Music(commands.Cog):
                             color=0x1DB954
                         )
                         
-                        # Add thumbnail if available
                         if info and info.get('thumbnail'):
                             embed.set_thumbnail(url=info['thumbnail'])
                         
-                        # Add duration info if available
                         if info and info.get('duration'):
                             minutes, seconds = divmod(info['duration'], 60)
                             embed.add_field(name="Duration", value=f"{minutes}:{seconds:02d}")
@@ -436,20 +397,21 @@ class Music(commands.Cog):
                     except Exception:
                         # Fallback if getting thumbnail fails
                         await ctx.send(f"🎶 Now playing: <{url}>", view=MusicControls(self, ctx))
-                    
-                    self.log.info("Started playback for %s in guild %s", url, guild_id)
-                    break
-                except discord.ClientException as e:
-                    # Not connected to voice or other client exception
-                    self.log.warning("ClientException during play: %s (attempt %s)", e, play_attempts + 1)
-                    await asyncio.sleep(0.5)
-                    play_attempts += 1
-                    continue
-                except Exception as e:
-                    self.log.exception("Failed to start playback for %s: %s", url, e)
-                    await ctx.send(f"❌ Failed to play audio: {e}")
-                    break
-            # cleanup is handled in the _after callback above
+                
+                # Run notification in background
+                self.bot.loop.create_task(_send_now_playing())
+                
+            except Exception as e:
+                self.log.exception("Failed to start playback for %s: %s", url, e)
+                await ctx.send(f"❌ Failed to play audio: {e}")
+                # cleanup
+                try:
+                    if guild_id in self.current_files:
+                        source = self.current_files.pop(guild_id)
+                        if hasattr(source, 'cleanup'):
+                            await source.cleanup()
+                except Exception:
+                    pass
 
     @commands.command(name="join")
     async def join(self, ctx: commands.Context):
