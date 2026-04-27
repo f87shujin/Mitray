@@ -90,8 +90,11 @@ class AI(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        # Ignore bot messages and messages from other channels
+        # Ignore bot messages, messages from other channels, and command invocations
         if message.author.bot or message.channel.id != self.target_channel_id:
+            return
+        # Skip messages that look like bot commands (start with command prefix)
+        if message.content.startswith("mit "):
             return
 
         try:
