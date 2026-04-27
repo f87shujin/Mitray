@@ -7,13 +7,17 @@ import logging
 from pathlib import Path
 from collections import defaultdict, deque
 from typing import Dict, Deque, List, Tuple
+from dotenv import load_dotenv
+import os
 
 class AI(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.api_base = "http://localhost:11434/api"
-        self.target_channel_id = None  # Will be set from config
-        self.model_name = None  # Will be set from config
+        load_dotenv()
+        self.api_key = os.getenv("DEEPSEEK_API_KEY", "sk-31ed19c7ad91401ebaa2ef2e0c73ff64")
+        self.api_base = "https://api.deepseek.com/v1/chat/completions"
+        self.model_name = "deepseek-chat"
+        self.target_channel_id = None
         self.logger = logging.getLogger("mitray.ai")
         self.conversation_history: Dict[int, Deque[Tuple[str, str]]] = defaultdict(lambda: deque(maxlen=10))
         self.long_term_summary = None  # Optional summary of long-term memory
@@ -26,37 +30,36 @@ class AI(commands.Cog):
         return formatted.strip()
 
     async def generate_response(self, prompt: str, channel_id: int, username: str) -> str:
-        """Generate a response using Ollama API, with summary and last 10 turns as context."""
+        """Generate a response using DeepSeek API, with summary and last 10 turns as context."""
         try:
             # Add the new message to history before generating response
             self.conversation_history[channel_id].append((username, prompt))
 
             # Build context from last 35 messages (short-term memory)
             history = list(self.conversation_history[channel_id])[-35:]
-            context = ""
-            for author, msg in history:
-                context += f"{author}: {msg}\n"
-            context = context.strip()
+            messages = [{"role": "system", "content": "You are Mitray, a helpful Discord AI assistant. You are friendly, helpful, and concise in your responses."}]
 
-            # Add summary at the top if available
-            if self.long_term_summary:
-                full_prompt = f"Summary of previous conversation:\n{self.long_term_summary}\n\n{context}\n{username}: {prompt}\nMitray:"
-            else:
-                full_prompt = f"{context}\n{username}: {prompt}\nMitray:"
+            for author, msg in history:
+                role = "assistant" if author == "Mitray" else "user"
+                messages.append({"role": role, "content": msg})
 
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{self.api_base}/generate",
+                    self.api_base,
+                    headers={
+                        "Authorization": f"Bearer {self.api_key}",
+                        "Content-Type": "application/json"
+                    },
                     json={
                         "model": self.model_name,
-                        "prompt": full_prompt,
-                        "stream": False
+                        "messages": messages,
+                        "max_tokens": 1024
                     },
                     timeout=30.0
                 )
                 response.raise_for_status()
                 result = response.json()
-                bot_response = result.get("response", "Sorry, I couldn't generate a response.")
+                bot_response = result["choices"][0]["message"]["content"].strip()
 
                 # Add bot's response to history
                 self.conversation_history[channel_id].append(("Mitray", bot_response))
@@ -102,11 +105,10 @@ class AI(commands.Cog):
         except Exception as e:
             self.logger.error(f"Error processing message: {e}")
 
-    async def configure(self, channel_id: int, model_name: str):
+    async def configure(self, channel_id: int):
         """Configure the AI cog with necessary parameters"""
         self.target_channel_id = channel_id
-        self.model_name = model_name
-        self.logger.info(f"AI configured for channel {channel_id} using model {model_name}")
+        self.logger.info(f"AI configured for channel {channel_id} using DeepSeek")
         
         # Check if channel exists before loading history
         channel = self.bot.get_channel(channel_id)
@@ -127,8 +129,7 @@ async def setup(bot: commands.Bot):
         try:
             # Configure the cog after the bot is ready
             await ai_cog.configure(
-                channel_id=1407544434408558774,  # Channel ID
-                model_name="mitray"  # Using our custom Mitray model
+                channel_id=1407544434408558774
             )
             ai_cog.logger.info("AI cog configured successfully")
         except Exception as e:
